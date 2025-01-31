@@ -1,5 +1,6 @@
 use log::debug;
 use rand::Rng;
+use std::rc::Rc;
 
 use crate::channel_handler::{
     ChannelCoinSpendInfo, ChannelHandler, ChannelHandlerEnv, ChannelHandlerInitiationData,
@@ -10,13 +11,13 @@ use crate::common::standard_coin::{
     get_standard_coin_puzzle, private_to_public_key, puzzle_for_pk, read_hex_puzzle,
 };
 use crate::common::types::{
-    AllocEncoder, Amount, CoinID, Error, GameID, Hash, Puzzle, PuzzleHash, Sha256tree,
+    AllocEncoder, Amount, CoinID, Error, GameID, Hash, Puzzle, PuzzleHash, Sha256tree, Timeout,
 };
 
 pub struct ChannelHandlerParty {
     pub ch: ChannelHandler,
     pub init_data: ChannelHandlerInitiationResult,
-    pub referee: Puzzle,
+    pub referee: Rc<Puzzle>,
     pub ref_puzzle_hash: PuzzleHash,
     pub contribution: Amount,
 }
@@ -25,7 +26,7 @@ impl ChannelHandlerParty {
     pub fn new<R: Rng>(
         env: &mut ChannelHandlerEnv<R>,
         private_keys: ChannelHandlerPrivateKeys,
-        referee: Puzzle,
+        referee: Rc<Puzzle>,
         ref_puzzle_hash: PuzzleHash,
         data: &ChannelHandlerInitiationData,
     ) -> Result<ChannelHandlerParty, Error> {
@@ -52,16 +53,18 @@ impl ChannelHandlerGame {
         game_id: GameID,
         launcher_coin_id: &CoinID,
         contributions: &[Amount; 2],
+        unroll_advance_timeout: Timeout,
     ) -> Result<ChannelHandlerGame, Error> {
         let private_keys: [ChannelHandlerPrivateKeys; 2] = env.rng.gen();
 
-        let make_ref_info =
-            |env: &mut ChannelHandlerEnv<R>, id: usize| -> Result<(Puzzle, PuzzleHash), Error> {
-                let ref_key = private_to_public_key(&private_keys[id].my_referee_private_key);
-                let referee = puzzle_for_pk(env.allocator, &ref_key)?;
-                let ref_puzzle_hash = referee.sha256tree(env.allocator);
-                Ok((referee, ref_puzzle_hash))
-            };
+        let make_ref_info = |env: &mut ChannelHandlerEnv<R>,
+                             id: usize|
+         -> Result<(Rc<Puzzle>, PuzzleHash), Error> {
+            let ref_key = private_to_public_key(&private_keys[id].my_referee_private_key);
+            let referee = puzzle_for_pk(env.allocator, &ref_key)?;
+            let ref_puzzle_hash = referee.sha256tree(env.allocator);
+            Ok((Rc::new(referee), ref_puzzle_hash))
+        };
 
         let ref1 = make_ref_info(env, 0)?;
         let ref2 = make_ref_info(env, 1)?;
@@ -81,6 +84,7 @@ impl ChannelHandlerGame {
                     their_referee_puzzle_hash: referees[id ^ 1].1.clone(),
                     my_contribution: contributions[id].clone(),
                     their_contribution: contributions[id ^ 1].clone(),
+                    unroll_advance_timeout: unroll_advance_timeout.clone(),
                 };
 
                 ChannelHandlerParty::new(
@@ -151,19 +155,19 @@ impl ChannelHandlerGame {
 pub fn channel_handler_env<'a, R: Rng>(
     allocator: &'a mut AllocEncoder,
     rng: &'a mut R,
-) -> ChannelHandlerEnv<'a, R> {
-    let referee_coin_puzzle =
-        read_hex_puzzle(allocator, "clsp/onchain/referee.hex").expect("should be readable");
+) -> Result<ChannelHandlerEnv<'a, R>, Error> {
+    let referee_coin_puzzle = Rc::new(read_hex_puzzle(allocator, "clsp/onchain/referee.hex")?);
     let referee_coin_puzzle_hash: PuzzleHash = referee_coin_puzzle.sha256tree(allocator);
-    let unroll_puzzle = read_hex_puzzle(
+    let unroll_puzzle = Rc::new(read_hex_puzzle(
         allocator,
         "clsp/unroll/unroll_puzzle_state_channel_unrolling.hex",
-    )
-    .expect("should read");
-    let unroll_metapuzzle =
-        read_hex_puzzle(allocator, "clsp/unroll/unroll_meta_puzzle.hex").expect("should read");
-    let standard_puzzle = get_standard_coin_puzzle(allocator).expect("should load");
-    ChannelHandlerEnv {
+    )?);
+    let unroll_metapuzzle = Rc::new(read_hex_puzzle(
+        allocator,
+        "clsp/unroll/unroll_meta_puzzle.hex",
+    )?);
+    let standard_puzzle = Rc::new(get_standard_coin_puzzle(allocator)?);
+    Ok(ChannelHandlerEnv {
         allocator,
         rng,
         referee_coin_puzzle,
@@ -172,5 +176,5 @@ pub fn channel_handler_env<'a, R: Rng>(
         unroll_puzzle,
         standard_puzzle,
         agg_sig_me_additional_data: Hash::from_bytes(AGG_SIG_ME_ADDITIONAL_DATA),
-    }
+    })
 }

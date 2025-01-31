@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use clvm_traits::{ClvmEncoder, ToClvm};
 use clvmr::allocator::NodePtr;
@@ -227,7 +228,7 @@ impl Simulator {
             coin: coin.clone(),
             bundle: Spend {
                 puzzle: identity.puzzle.clone(),
-                solution: Program::from_nodeptr(allocator, coin_spend_info.solution)?,
+                solution: coin_spend_info.solution.clone(),
                 signature: coin_spend_info.signature,
             },
         };
@@ -290,7 +291,6 @@ impl Simulator {
     ) -> PyResult<Vec<CoinString>> {
         Python::with_gil(|py| -> PyResult<_> {
             let items: Vec<PyObject> = coins.extract(py)?;
-            debug!("num coins {}", items.len());
             let mut result_coins = Vec::new();
             for i in items.iter() {
                 let coin_of_item: PyObject = if let Ok(res) = i.getattr(py, "coin") {
@@ -298,8 +298,6 @@ impl Simulator {
                 } else {
                     i.extract(py)?
                 };
-                let as_list_str: String = coin_of_item.call_method0(py, "__repr__")?.extract(py)?;
-                debug!("as_list_str {as_list_str}");
                 let as_list: Vec<PyObject> =
                     self.coin_as_list.call1(py, (coin_of_item,))?.extract(py)?;
                 let parent_coin_info: &PyBytes = as_list[0].downcast(py)?;
@@ -309,11 +307,12 @@ impl Simulator {
                 let amount: u64 = as_list[2].extract(py)?;
                 let parent_coin_hash = Hash::from_slice(parent_coin_info_slice);
                 let puzzle_hash = Hash::from_slice(puzzle_hash_slice);
-                result_coins.push(CoinString::from_parts(
+                let new_coin = CoinString::from_parts(
                     &CoinID::new(parent_coin_hash),
                     &PuzzleHash::from_hash(puzzle_hash),
                     &Amount::new(amount),
-                ));
+                );
+                result_coins.push(new_coin);
             }
             Ok(result_coins)
         })
@@ -332,6 +331,33 @@ impl Simulator {
             let coins =
                 self.async_client(py, "get_coin_records_by_puzzle_hash", (hash_bytes, false))?;
             self.convert_coin_list_to_coin_strings(py, &coins)
+        })
+    }
+
+    pub fn get_puzzle_and_solution(
+        &self,
+        coin_string: &CoinString,
+    ) -> PyResult<Option<(Program, Program)>> {
+        Python::with_gil(|py| -> PyResult<_> {
+            let hash_bytes = PyBytes::new(py, coin_string.to_coin_id().bytes());
+            let record = self.async_client(py, "get_coin_record_by_name", (&hash_bytes,))?;
+            let height_of_spend =
+                if let Ok(height_of_spend) = record.getattr(py, "spent_block_index") {
+                    height_of_spend
+                } else {
+                    return Ok(None);
+                };
+            let puzzle_and_solution =
+                self.async_client(py, "get_puzzle_and_solution", (hash_bytes, height_of_spend))?;
+            let puzzle_reveal: PyObject = puzzle_and_solution.getattr(py, "puzzle_reveal")?;
+            let solution: PyObject = puzzle_and_solution.getattr(py, "solution")?;
+
+            let puzzle_str: Vec<u8> = puzzle_reveal.call_method0(py, "__bytes__")?.extract(py)?;
+            let solution_str: Vec<u8> = solution.call_method0(py, "__bytes__")?.extract(py)?;
+            Ok(Some((
+                Program::from_bytes(&puzzle_str),
+                Program::from_bytes(&solution_str),
+            )))
         })
     }
 
@@ -368,14 +394,12 @@ impl Simulator {
         py: Python<'_>,
         allocator: &mut AllocEncoder,
         parent_coin: &CoinString,
-        puzzle_reveal: Puzzle,
+        puzzle_reveal: Rc<Puzzle>,
         solution: NodePtr,
     ) -> PyResult<PyObject> {
         let coin = self.make_coin(parent_coin)?;
-        debug!("coin = {coin:?}");
         let puzzle_hex = puzzle_reveal.to_hex();
         let puzzle_program = self.hex_to_program(&puzzle_hex)?;
-        debug!("puzzle_program = {puzzle_program:?}");
         let solution_hex = Node(solution).to_hex(allocator).map_err(|_| {
             PyErr::from_value(
                 PyIndexError::new_err("failed hex conversion")
@@ -390,7 +414,6 @@ impl Simulator {
                     .into(),
             )
         })?;
-        debug!("solution_program = {solution_program:?}");
         self.make_spend
             .call1(py, (coin, puzzle_program, solution_program))
     }
@@ -437,7 +460,6 @@ impl Simulator {
     ) -> PyResult<IncludeTransactionResult> {
         let spend_bundle = self.make_spend_bundle(allocator, txs)?;
         Python::with_gil(|py| {
-            debug!("spend_bundle {:?}", spend_bundle);
             let spend_res: PyObject = self
                 .async_client(py, "push_tx", (spend_bundle,))?
                 .extract(py)?;
@@ -503,7 +525,7 @@ impl Simulator {
         let tx = CoinSpend {
             bundle: Spend {
                 puzzle: identity_source.puzzle.clone(),
-                solution: Program::from_nodeptr(allocator, standard_solution)?,
+                solution: Rc::new(Program::from_nodeptr(allocator, standard_solution)?),
                 signature,
             },
             coin: source_coin.clone(),
@@ -557,7 +579,7 @@ impl Simulator {
             spends.push(CoinSpend {
                 bundle: Spend {
                     puzzle: owner.puzzle.clone(),
-                    solution: Program::from_nodeptr(allocator, solution)?,
+                    solution: Rc::new(Program::from_nodeptr(allocator, solution)?),
                     signature,
                 },
                 coin: c.clone(),

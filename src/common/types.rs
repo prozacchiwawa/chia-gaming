@@ -1,5 +1,9 @@
+use std::borrow::Borrow;
 use std::io;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
+use std::rc::Rc;
+
+use log::debug;
 
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -15,9 +19,11 @@ use sha2::{Digest, Sha256};
 use clvmr::allocator::{Allocator, NodePtr, SExp};
 use clvmr::reduction::EvalErr;
 use clvmr::serde::{node_from_bytes, node_to_bytes};
+use clvmr::{run_program, ChiaDialect, NO_UNKNOWN_OPS};
 
 use clvm_tools_rs::classic::clvm::sexp::proper_list;
 use clvm_tools_rs::classic::clvm::syntax_error::SyntaxErr;
+use clvm_tools_rs::classic::clvm_tools::binutils::disassemble;
 use clvm_tools_rs::classic::clvm_tools::sha256tree::sha256tree;
 
 use crate::common::constants::{AGG_SIG_ME_ATOM, AGG_SIG_UNSAFE_ATOM, CREATE_COIN_ATOM, REM_ATOM};
@@ -28,6 +34,10 @@ use clvm_traits::{ClvmEncoder, ToClvm, ToClvmError};
 
 #[cfg(test)]
 use clvm_tools_rs::compiler::runtypes::RunFailure;
+
+pub fn chia_dialect() -> ChiaDialect {
+    ChiaDialect::new(NO_UNKNOWN_OPS)
+}
 
 /// CoinID
 #[derive(Default, Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -352,7 +362,7 @@ impl ToClvm<NodePtr> for Aggsig {
 }
 
 /// Game ID
-#[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub struct GameID(Vec<u8>);
 
 impl GameID {
@@ -459,7 +469,7 @@ impl From<Amount> for u64 {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize, Hash, Default)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize, Hash, Default)]
 pub struct Hash([u8; 32]);
 
 impl ToClvm<NodePtr> for Hash {
@@ -468,6 +478,14 @@ impl ToClvm<NodePtr> for Hash {
         encoder: &mut impl ClvmEncoder<Node = NodePtr>,
     ) -> Result<NodePtr, ToClvmError> {
         encoder.encode_atom(&self.0)
+    }
+}
+
+impl std::fmt::Debug for Hash {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(formatter, "Hash(")?;
+        write!(formatter, "{}", hex::encode(self.0))?;
+        write!(formatter, ")")
     }
 }
 
@@ -532,7 +550,7 @@ impl Sha256Input<'_> {
 }
 
 /// Puzzle hash
-#[derive(Default, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Default, Clone, Eq, PartialEq, Debug, Serialize, Deserialize, Hash)]
 pub struct PuzzleHash(Hash);
 
 impl PuzzleHash {
@@ -657,8 +675,14 @@ impl<X: ToClvm<NodePtr>> Sha256tree for X {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Program(pub Vec<u8>);
+
+impl std::fmt::Debug for Program {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "Program({})", hex::encode(&self.0))
+    }
+}
 
 impl Program {
     pub fn to_nodeptr(&self, allocator: &mut AllocEncoder) -> Result<NodePtr, Error> {
@@ -667,6 +691,11 @@ impl Program {
     pub fn from_nodeptr(allocator: &mut AllocEncoder, n: NodePtr) -> Result<Program, Error> {
         let bytes = clvmr::serde::node_to_bytes(allocator.allocator(), n).into_gen()?;
         Ok(Program(bytes))
+    }
+
+    pub fn from_hex(s: &str) -> Result<Program, Error> {
+        let bytes = hex::decode(s).into_gen()?;
+        Ok(Program::from_bytes(&bytes))
     }
 
     pub fn from_bytes(by: &[u8]) -> Program {
@@ -713,7 +742,7 @@ impl ToClvm<NodePtr> for Program {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Puzzle(Program);
+pub struct Puzzle(Rc<Program>);
 
 impl ToClvm<NodePtr> for Puzzle {
     fn to_clvm(
@@ -725,11 +754,11 @@ impl ToClvm<NodePtr> for Puzzle {
 }
 
 impl Puzzle {
-    pub fn to_program(&self) -> Program {
+    pub fn to_program(&self) -> Rc<Program> {
         self.0.clone()
     }
     pub fn from_bytes(by: &[u8]) -> Puzzle {
-        Puzzle(Program::from_bytes(by))
+        Puzzle(Rc::new(Program::from_bytes(by)))
     }
     pub fn from_nodeptr(allocator: &mut AllocEncoder, node: NodePtr) -> Result<Puzzle, Error> {
         let bytes = node_to_bytes(allocator.allocator(), node).into_gen()?;
@@ -942,17 +971,13 @@ fn parse_condition(allocator: &mut AllocEncoder, condition: NodePtr) -> Option<C
                     Amount::new(amt),
                 ));
             }
-        } else {
-            return None;
         }
-    } else if exploded.len() > 1
-        && matches!(
-            (
-                allocator.allocator().sexp(exploded[0]),
-                allocator.allocator().sexp(exploded[1])
-            ),
-            (SExp::Atom, SExp::Atom)
-        )
+    }
+
+    if !exploded.is_empty()
+        && exploded
+            .iter()
+            .all(|e| matches!(allocator.allocator().sexp(*e), SExp::Atom))
     {
         let atoms: Vec<Vec<u8>> = exploded
             .iter()
@@ -980,12 +1005,35 @@ impl CoinCondition {
             Vec::new()
         }
     }
+
+    pub fn from_puzzle_and_solution(
+        allocator: &mut AllocEncoder,
+        puzzle: &Program,
+        solution: &Program,
+    ) -> Result<Vec<CoinCondition>, Error> {
+        let run_puzzle = puzzle.to_nodeptr(allocator)?;
+        let run_args = solution.to_nodeptr(allocator)?;
+        let conditions = run_program(
+            allocator.allocator(),
+            &chia_dialect(),
+            run_puzzle,
+            run_args,
+            0,
+        )
+        .into_gen()?;
+        debug!(
+            "conditions to parse {}",
+            disassemble(allocator.allocator(), conditions.1, None)
+        );
+
+        Ok(CoinCondition::from_nodeptr(allocator, conditions.1))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Spend {
-    pub puzzle: Puzzle,
-    pub solution: Program,
+    pub puzzle: Rc<Puzzle>,
+    pub solution: Rc<Program>,
     pub signature: Aggsig,
 }
 
@@ -998,20 +1046,21 @@ pub struct CoinSpend {
 impl Default for Spend {
     fn default() -> Self {
         Spend {
-            puzzle: Puzzle::from_bytes(&[0x80]),
-            solution: Program::from_bytes(&[0x80]),
+            puzzle: Rc::new(Puzzle::from_bytes(&[0x80])),
+            solution: Rc::new(Program::from_bytes(&[0x80])),
             signature: Aggsig::default(),
         }
     }
 }
 
 pub struct SpendRewardResult {
-    pub coins_with_solutions: Vec<Spend>,
+    pub coins_with_solutions: Vec<CoinSpend>,
     pub result_coin_string_up: CoinString,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpendBundle {
+    pub name: Option<String>,
     pub spends: Vec<CoinSpend>,
 }
 
@@ -1045,8 +1094,8 @@ pub fn atom_from_clvm(allocator: &mut AllocEncoder, n: NodePtr) -> Option<&[u8]>
 
 /// Maximum information about a coin spend.  Everything one might need downstream.
 pub struct BrokenOutCoinSpendInfo {
-    pub solution: NodePtr,
-    pub conditions: NodePtr,
+    pub solution: Rc<Program>,
+    pub conditions: Rc<Program>,
     pub message: Vec<u8>,
     pub signature: Aggsig,
 }
@@ -1065,19 +1114,43 @@ pub fn divmod(a: BigInt, b: BigInt) -> (BigInt, BigInt) {
 #[test]
 fn test_local_divmod() {
     assert_eq!(
-        divmod(-7.to_bigint().unwrap(), 2.to_bigint().unwrap()),
-        (-4.to_bigint().unwrap(), 1.to_bigint().unwrap())
+        divmod((-7).to_bigint().unwrap(), 2.to_bigint().unwrap()),
+        ((-4).to_bigint().unwrap(), 1.to_bigint().unwrap())
     );
     assert_eq!(
-        divmod(7.to_bigint().unwrap(), -2.to_bigint().unwrap()),
-        (-4.to_bigint().unwrap(), -1.to_bigint().unwrap())
+        divmod(7.to_bigint().unwrap(), (-2).to_bigint().unwrap()),
+        ((-4).to_bigint().unwrap(), (-1).to_bigint().unwrap())
     );
     assert_eq!(
-        divmod(-7.to_bigint().unwrap(), -2.to_bigint().unwrap()),
-        (3.to_bigint().unwrap(), -1.to_bigint().unwrap())
+        divmod((-7).to_bigint().unwrap(), (-2).to_bigint().unwrap()),
+        (3.to_bigint().unwrap(), (-1).to_bigint().unwrap())
     );
     assert_eq!(
         divmod(7.to_bigint().unwrap(), 2.to_bigint().unwrap()),
         (3.to_bigint().unwrap(), 1.to_bigint().unwrap())
     );
+}
+
+pub struct RcNode<X>(Rc<X>);
+
+impl<X: ToClvm<NodePtr>> ToClvm<NodePtr> for RcNode<X> {
+    fn to_clvm(
+        &self,
+        encoder: &mut impl ClvmEncoder<Node = NodePtr>,
+    ) -> Result<NodePtr, ToClvmError> {
+        let borrowed: &X = self.0.borrow();
+        borrowed.to_clvm(encoder)
+    }
+}
+
+impl<X> RcNode<X> {
+    pub fn new(node: Rc<X>) -> Self {
+        RcNode(node.clone())
+    }
+}
+
+impl<X> From<&Rc<X>> for RcNode<X> {
+    fn from(item: &Rc<X>) -> RcNode<X> {
+        RcNode(item.clone())
+    }
 }

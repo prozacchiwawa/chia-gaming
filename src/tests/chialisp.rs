@@ -1,8 +1,7 @@
 use std::rc::Rc;
 
-use crate::channel_handler::game_handler::chia_dialect;
 use crate::common::standard_coin::read_hex_puzzle;
-use crate::common::types::{AllocEncoder, Node, Sha256Input};
+use crate::common::types::{chia_dialect, AllocEncoder, Node, Sha256Input};
 
 use clvm_traits::ToClvm;
 use clvmr::run_program;
@@ -92,7 +91,7 @@ fn test_make_cards() {
 #[test]
 fn test_mergein() {
     let mut allocator = AllocEncoder::new();
-    let tests = vec![
+    let tests = [
         ([vec![1, 2, 9], vec![], vec![]], "(q 2 9)"),
         ([vec![1, 2, 9], vec![3], vec![]], "(q 2 5 9)"),
     ];
