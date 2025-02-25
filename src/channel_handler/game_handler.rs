@@ -242,11 +242,12 @@ impl GameHandler {
             return Err(Error::StrErr("bad move".to_string()));
         };
 
-        let our_validation_prog = Rc::new(Program::from_nodeptr(allocator, pl[1])?);
-        let our_validation_program = ValidationProgram::new(allocator, our_validation_prog);
-        let their_validation_prog = Rc::new(Program::from_nodeptr(allocator, pl[2])?);
+        let their_validation_prog = Rc::new(Program::from_nodeptr(allocator, pl[1])?);
         let their_validation_program = ValidationProgram::new(allocator, their_validation_prog);
+        let our_validation_prog = Rc::new(Program::from_nodeptr(allocator, pl[2])?);
+        let our_validation_program = ValidationProgram::new(allocator, our_validation_prog);
         let state = Rc::new(Program::from_nodeptr(allocator, pl[3])?);
+
         Ok(MyTurnResult {
             waiting_driver: GameHandler::their_driver_from_nodeptr(allocator, pl[6])?,
             my_turn_validation_program: our_validation_program,
