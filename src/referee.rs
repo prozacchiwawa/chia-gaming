@@ -873,7 +873,7 @@ impl RefereeMaker {
                 ..
             } => Ok(initial_validation_program.to_program().clone()),
             RefereeMakerGameState::AfterOurTurn { my_turn_result, .. } => {
-                Ok(my_turn_result.validation_program.to_program())
+                Ok(my_turn_result.their_turn_validation_program.to_program())
             }
             RefereeMakerGameState::AfterTheirTurn { .. } => Err(Error::StrErr(
                 "we already accepted their turn so it can't be validated".to_string(),
@@ -993,7 +993,7 @@ impl RefereeMaker {
             RefereeMakerGameState::AfterOurTurn { my_turn_result, .. } => {
                 let is_hash = my_turn_result.state.sha256tree(allocator).hash().clone();
                 let ip_hash = my_turn_result
-                    .validation_program
+                    .their_turn_validation_program
                     .sha256tree(allocator)
                     .hash()
                     .clone();
@@ -1008,7 +1008,7 @@ impl RefereeMaker {
                 RefereeMakerGameState::AfterTheirTurn {
                     game_handler: raw_game_handler.clone(),
                     most_recent_our_state_result: my_turn_result.state.clone(),
-                    most_recent_our_validation_program: my_turn_result.validation_program.clone(),
+                    most_recent_our_validation_program: my_turn_result.their_turn_validation_program.clone(),
                     our_turn_game_handler: raw_game_handler.clone(),
                     create_this_coin: old_args,
                     spend_this_coin: referee_args,

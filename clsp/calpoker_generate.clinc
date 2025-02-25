@@ -34,7 +34,7 @@
         (list
             image
             pokerb
-            pokerb_hash
+            pokerc
             image
             16
             0
@@ -82,7 +82,7 @@
         (list
             (concat PREIMAGE new_commit)
             pokerd
-            pokerd_hash
+            pokere
             (list cards new_commit)
             1
             0
@@ -147,8 +147,8 @@
         seed (substr entropy 0 16)
         (list
             seed
+            pokerb
             pokerc
-            pokerc_hash
             (list ALICE_COMMIT seed)
             48
             0
@@ -204,8 +204,8 @@
         my_move (bitify local_move)
         (list
             my_move
+            pokerd
             pokere
-            pokere_hash
             (list my_move (list ALICE_CARDS BOB_CARDS) ALICE_COMMIT_2)
             18
             0

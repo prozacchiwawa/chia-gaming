@@ -67,8 +67,8 @@ fn get_my_turn_debug_flag(_: &MyTurnInputs) -> bool {
 pub struct MyTurnResult {
     // Next player's turn game handler.
     pub waiting_driver: GameHandler,
-    pub validation_program: ValidationProgram,
-    pub validation_program_hash: Hash,
+    pub my_turn_validation_program: ValidationProgram,
+    pub their_turn_validation_program: ValidationProgram,
     pub state: Rc<Program>,
     pub game_move: GameMoveDetails,
     pub message_parser: Option<MessageHandler>,
@@ -236,25 +236,21 @@ impl GameHandler {
         } else {
             Some(MessageHandler::from_nodeptr(allocator, pl[7])?)
         };
-        let validation_program_hash =
-            if let Some(h) = atom_from_clvm(allocator, pl[2]).map(|a| Hash::from_slice(&a)) {
-                h
-            } else {
-                return Err(Error::StrErr("bad hash".to_string()));
-            };
         let move_data = if let Some(m) = atom_from_clvm(allocator, pl[0]).map(|a| a.to_vec()) {
             m
         } else {
             return Err(Error::StrErr("bad move".to_string()));
         };
 
-        let validation_prog = Rc::new(Program::from_nodeptr(allocator, pl[1])?);
-        let validation_program = ValidationProgram::new(allocator, validation_prog);
+        let our_validation_prog = Rc::new(Program::from_nodeptr(allocator, pl[1])?);
+        let our_validation_program = ValidationProgram::new(allocator, our_validation_prog);
+        let their_validation_prog = Rc::new(Program::from_nodeptr(allocator, pl[2])?);
+        let their_validation_program = ValidationProgram::new(allocator, their_validation_prog);
         let state = Rc::new(Program::from_nodeptr(allocator, pl[3])?);
         Ok(MyTurnResult {
             waiting_driver: GameHandler::their_driver_from_nodeptr(allocator, pl[6])?,
-            validation_program,
-            validation_program_hash: validation_program_hash.clone(),
+            my_turn_validation_program: our_validation_program,
+            their_turn_validation_program: their_validation_program.clone(),
             state,
             game_move: GameMoveDetails {
                 basic: GameMoveStateInfo {
@@ -264,7 +260,7 @@ impl GameHandler {
                 },
                 validation_info_hash: ValidationInfo::new_from_validation_program_hash_and_state(
                     allocator,
-                    validation_program_hash,
+                    their_validation_program.hash().clone(),
                     pl[3],
                 )
                 .hash()
