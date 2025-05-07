@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::read_to_string;
+use std::rc::Rc;
 
 use log::debug;
 use num_bigint::{BigInt, Sign};
@@ -415,11 +416,13 @@ pub fn standard_solution_unsafe(
     let quoted_conds = conditions.to_quoted_program(allocator)?;
     let quoted_conds_hash = quoted_conds.sha256tree(allocator);
     let solution = solution_for_conditions(allocator, conditions)?;
+    let solution_program = Program::from_nodeptr(allocator, solution)?;
     let message = quoted_conds_hash.bytes().to_vec();
     let (_, sig) = signer(private_key, &message);
+    let conditions_program = Program::from_nodeptr(allocator, conditions)?;
     Ok(BrokenOutCoinSpendInfo {
-        solution,
-        conditions,
+        solution: Rc::new(solution_program),
+        conditions: Rc::new(conditions_program),
         message,
         signature: sig,
     })
@@ -469,18 +472,26 @@ pub fn standard_solution_partial(
     // so in this case we can front load the conditions without running the puzzle.
     // Ensure we unborrow allocator before the code below.
     let conds = CoinCondition::from_nodeptr(allocator, conditions);
+    let mut one_create = false;
     for cond in conds.iter() {
         match cond {
             CoinCondition::CreateCoin(_, _) => {
                 debug!("adding signature based on create coin: {aggregate_public_key:?} {coin_agg_sig_me_message:?}");
-                add_signature(
-                    &mut aggregated_signature,
-                    if partial {
-                        partial_signer(private_key, aggregate_public_key, &coin_agg_sig_me_message)
-                    } else {
-                        private_key.sign(&coin_agg_sig_me_message)
-                    },
-                );
+                if !one_create {
+                    one_create = true;
+                    add_signature(
+                        &mut aggregated_signature,
+                        if partial {
+                            partial_signer(
+                                private_key,
+                                aggregate_public_key,
+                                &coin_agg_sig_me_message,
+                            )
+                        } else {
+                            private_key.sign(&coin_agg_sig_me_message)
+                        },
+                    );
+                }
             }
             CoinCondition::AggSigMe(pubkey, data) => {
                 let mut message = pubkey.bytes().to_vec();
@@ -494,6 +505,7 @@ pub fn standard_solution_partial(
             }
             CoinCondition::AggSigUnsafe(pubkey, data) => {
                 // It's "unsafe" because it's just a hash of the data.
+                debug!("adding unsafe sig for {data:?}");
                 add_signature(
                     &mut aggregated_signature,
                     partial_signer(private_key, pubkey, data),
@@ -516,10 +528,12 @@ pub fn standard_solution_partial(
     }
 
     if let Some(signature) = aggregated_signature {
+        let solution_program = Program::from_nodeptr(allocator, solution)?;
+        let conditions_program = Program::from_nodeptr(allocator, conditions)?;
         Ok(BrokenOutCoinSpendInfo {
-            solution,
+            solution: Rc::new(solution_program.clone()),
             signature,
-            conditions,
+            conditions: Rc::new(conditions_program.clone()),
             message: coin_agg_sig_me_message,
         })
     } else {
@@ -535,7 +549,7 @@ pub struct ChiaIdentity {
     pub synthetic_public_key: PublicKey,
     pub public_key: PublicKey,
     pub synthetic_private_key: PrivateKey,
-    pub puzzle: Puzzle,
+    pub puzzle: Rc<Puzzle>,
     pub puzzle_hash: PuzzleHash,
 }
 
@@ -549,7 +563,7 @@ impl ChiaIdentity {
             calculate_synthetic_secret_key(&private_key, &default_hidden_puzzle_hash)?;
         let public_key = private_to_public_key(&private_key);
         let synthetic_public_key = private_to_public_key(&synthetic_private_key);
-        let puzzle = puzzle_for_pk(allocator, &public_key)?;
+        let puzzle = Rc::new(puzzle_for_pk(allocator, &public_key)?);
         let puzzle_hash = puzzle_hash_for_pk(allocator, &public_key)?;
         assert_eq!(puzzle.sha256tree(allocator), puzzle_hash);
         Ok(ChiaIdentity {
